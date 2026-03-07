@@ -1,0 +1,131 @@
+services:
+  wireguard:
+    image: lscr.io/linuxserver/wireguard:latest
+    container_name: wireguard
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    environment:
+      PUID: "${PUID}"
+      PGID: "${PGID}"
+      TZ: "${TZ}"
+      SERVERURL: "${PUBLIC_IP}"
+      SERVERPORT: "${WG_PORT}"
+      PEERS: "1"
+      PEERDNS: "1.1.1.1"
+      INTERNAL_SUBNET: "${WG_SUBNET_BASE}"
+      ALLOWEDIPS: "${WG_SUBNET_CIDR}"
+      LOG_CONFS: "true"
+    volumes:
+      - ./wireguard/config:/config
+      - /lib/modules:/lib/modules:ro
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB}"
+      POSTGRES_USER: "${POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - app_net
+    restart: unless-stopped
+
+  backend-migrate:
+    build:
+      context: ./backend
+      target: ops
+    command: sh -c "npx prisma db push"
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - app_net
+    restart: "no"
+
+  backend-seed:
+    build:
+      context: ./backend
+      target: ops
+    command: sh -c "npx prisma db seed"
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - app_net
+    restart: "no"
+
+  backend:
+    build:
+      context: ./backend
+      target: runner
+    command: sh -c "node dist/server.js"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public"
+      JWT_SECRET: "${JWT_SECRET}"
+      CORS_ORIGIN: "http://10.10.0.1"
+    expose:
+      - "3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://127.0.0.1:3000/health',res=>process.exit(res.statusCode===200?0:1)).on('error',()=>process.exit(1))\""
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - app_net
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: /api
+    expose:
+      - "80"
+    networks:
+      - app_net
+    restart: unless-stopped
+
+  haproxy:
+    image: haproxy:2.8
+    depends_on:
+      - frontend
+      - backend
+    ports:
+      - "80:80"
+      - "8404:8404"
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    networks:
+      - app_net
+    restart: unless-stopped
+
+networks:
+  app_net:
+    driver: bridge
+
+volumes:
+  postgres_data:

@@ -1,0 +1,9 @@
+backend/
+frontend/
+.env
+.env.*
+wireguard/config/
+**/node_modules/
+**/dist/
+coverage/
+*.log
